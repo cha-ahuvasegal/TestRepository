@@ -2,6 +2,7 @@ USE P_Clarity_Report;
 GO
 DROP TABLE IF EXISTS #DICohort;
 DROP TABLE IF EXISTS #DICohortwithFlags;
+DROP TABLE IF EXISTS #CommunicationMode;
 DROP TABLE IF EXISTS #RankEncounters;
 
 /**************************************************************************************************************************
@@ -10,8 +11,8 @@ The SDE must have been last created/updated before 30/9/2023.
 **************************************************************************************************************************/
 
 SELECT DISTINCT 
-       pat.PAT_NAME "Patient Name"
-     , pat.PAT_ID
+       pat.PAT_ID "Pat ID"
+     , pat.PAT_NAME "Patient Name"
      , value.HLV_ID "Q1 HLV ID"
      , CAST(entity.CUR_VALUE_DATETIME AS DATE) "Last Updated"
      , CASE
@@ -48,12 +49,16 @@ SELECT DISTINCT
     FROM PATIENT_FYI_FLAGS genflag
     WHERE genflag.ACTIVE_C = '1'
           AND genflag.PAT_FLAG_TYPE_C = '1'
-          AND genflag.PATIENT_ID = #DICohort.PAT_ID
+          AND genflag.PATIENT_ID = #DICohort.[Pat ID]
 )
            THEN 'Yes'
            ELSE ''
        END AS "Gen Flag"
-     , hrfyi.[High Risk Flag]
+     , CASE
+           WHEN hrfyi.[High Risk Flag] <> ''
+           THEN hrfyi.[High Risk Flag]
+           ELSE ''
+       END AS "High Risk Flag"
 INTO #DICohortwithFlags
 FROM #DICohort
      LEFT JOIN --Coalesce all High Risk FYI Flags into 1 cell per patient
@@ -71,24 +76,27 @@ FROM #DICohort
              AND fyi.ACTIVE_C = '1'
     ) AS fyi2
     GROUP BY fyi2.PATIENT_ID
-) AS hrfyi ON #DICohort.PAT_ID = hrfyi.PATIENT_ID;
+) AS hrfyi ON #DICohort.[Pat ID] = hrfyi.PATIENT_ID;
+SELECT *
+FROM #DICohortwithFlags;
 
-/*********************************************
+/*******************************
 Determine if Letter or Portal
-*********************************************/
+*******************************/
 
-SELECT pat.PAT_ID
-     , pat.PAT_NAME
+SELECT pat.PAT_ID "Pat ID"
+     , pat.PAT_NAME "Patient Name"
      , CAST(pat.BIRTH_DATE AS DATE) "DOB"
      , patfact.AGE_YEARS "Patient Age"
-     , patmyc.MYCHART_STATUS_C
+       --    , patmyc.MYCHART_STATUS_C
      , patmycstat.NAME "Patient Portal Status"
      , CAST(mycpataccount.LAST_LOGIN_TIME AS DATE) "Last Patient Login"
      , mycpat.PAT_NAME "Proxy Name"
      , proxy.PROXY_WPR_ID "Proxy WPR"
-     , proxy.PROXY_STATUS_C
+       --     , proxy.PROXY_STATUS_C
      , mcstatus.NAME "Proxy Status"
      , CAST(mycpat.LAST_LOGIN_TIME AS DATE) "Last Proxy Login"
+INTO #CommunicationMode
 FROM PATIENT pat
      LEFT JOIN V_PAT_FACT patfact ON pat.PAT_ID = patfact.PAT_ID
 
@@ -103,7 +111,7 @@ FROM PATIENT pat
      LEFT JOIN MYC_PATIENT mycpataccount ON patmyc.MYPT_ID = mycpataccount.MYPT_ID
 WHERE pat.PAT_ID IN
 (
-    SELECT di.PAT_ID
+    SELECT di.[Pat ID]
     FROM #DICohort di
 )
       AND ((patfact.AGE_YEARS > 17
@@ -136,7 +144,7 @@ AND (hsp.ADMIT_CONF_STAT_C IS NULL
 AND COALESCE(CAST(patenc.HOSP_ADMSN_TIME AS DATE), CAST(patenc.APPT_TIME AS DATE), CAST(patenc.CONTACT_DATE AS DATE)) < '2023-09-30'
 AND patenc.PAT_ID IN
 (
-    SELECT di.PAT_ID
+    SELECT di.[Pat ID]
     FROM #DICohort di
 )
 ORDER BY patenc.PAT_ID
@@ -144,11 +152,37 @@ ORDER BY patenc.PAT_ID
 --SELECT * From #RankEncounters RE
 --Order By RE.PAT_ID, RE.EncounterRank ASC
 
-/*********************************************
+/*******************************
 Bring it all together
-*********************************************/
+*******************************/
 
-SELECT re.PAT_ID "Patient ID"
-     , re.[Service Area] "Service Area"
-FROM #RankEncounters RE
-WHERE RE.EncounterRank = 1;
+--SELECT re.PAT_ID "Patient ID"
+--     , re.[Service Area] "Service Area"
+--FROM #RankEncounters RE
+--WHERE RE.EncounterRank = 1;
+
+SELECT di.*
+     , CASE
+           WHEN re.[Service Area] = 10
+           THEN 'RCH'
+           WHEN re.[Service Area] = 2010
+           THEN 'RMH'
+           WHEN re.[Service Area] = 3010
+           THEN 'RWH'
+           WHEN re.[Service Area] = 4010
+           THEN 'PMCC'
+           ELSE ''
+       END AS "Service Area"
+     , CASE
+           WHEN EXISTS
+(
+    SELECT comms.[Pat ID]
+    FROM #CommunicationMode comms
+    WHERE comms.[Pat ID] = di.[Pat ID]
+)
+           THEN 'Portal'
+           ELSE 'Letter'
+       END AS "Comms Mode"
+FROM #DICohortwithFlags di
+     LEFT JOIN #RankEncounters re ON di.[Pat ID] = re.PAT_ID
+                                     AND re.EncounterRank = 1;
